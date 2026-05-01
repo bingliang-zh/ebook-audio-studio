@@ -52,3 +52,15 @@ TTS_PROVIDER=mock
 ```
 
 Use `TTS_PROVIDER=macos` for local macOS audio generation.
+
+## GitHub Pages
+
+The repository includes a GitHub Actions workflow that builds `client/` and deploys the static frontend to GitHub Pages.
+
+GitHub Pages can host the React UI, but it cannot run the Express upload/TTS server. Deploy the server separately, then add a repository variable:
+
+```bash
+VITE_API_BASE_URL=https://your-api-host.example
+```
+
+When the Pages workflow builds the frontend, API calls and audio links will use that backend URL.

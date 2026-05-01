@@ -1,5 +1,6 @@
 import { Download, FileAudio, Loader2, Upload } from "lucide-react";
 import { FormEvent, useEffect, useMemo, useState } from "react";
+import { apiUrl, assetUrl } from "./api";
 
 type TargetLanguage =
   | "en-US"
@@ -76,7 +77,7 @@ export function App() {
   }, [activeJobs]);
 
   async function loadJobs() {
-    const response = await fetch("/api/jobs");
+    const response = await fetch(apiUrl("/api/jobs"));
     const payload = (await response.json()) as { jobs: AudioJob[] };
     setJobs(payload.jobs);
   }
@@ -94,7 +95,7 @@ export function App() {
       body.append("language", language);
       body.append("tone", tone);
 
-      const response = await fetch("/api/jobs", {
+      const response = await fetch(apiUrl("/api/jobs"), {
         method: "POST",
         body
       });
@@ -189,6 +190,8 @@ export function App() {
 }
 
 function JobRow({ job }: { job: AudioJob }) {
+  const audioUrl = job.audioUrl ? assetUrl(job.audioUrl) : undefined;
+
   return (
     <article className="job-row">
       <div className="job-main">
@@ -202,10 +205,10 @@ function JobRow({ job }: { job: AudioJob }) {
         </div>
       </div>
 
-      {job.status === "done" && job.audioUrl ? (
+      {job.status === "done" && audioUrl ? (
         <div className="audio-actions">
-          <audio controls src={job.audioUrl} />
-          <a href={job.audioUrl} download>
+          <audio controls src={audioUrl} />
+          <a href={audioUrl} download>
             <Download aria-hidden="true" />
             下载
           </a>
