@@ -1,6 +1,7 @@
-import { Download, FileAudio, Loader2, Upload } from "lucide-react";
-import { FormEvent, useEffect, useMemo, useState } from "react";
-import { apiUrl, assetUrl } from "./api";
+import { invoke } from "@tauri-apps/api/core";
+import { open, save } from "@tauri-apps/plugin-dialog";
+import { CheckCircle2, FileAudio, FileText, FolderOpen, Loader2, Settings2 } from "lucide-react";
+import { useMemo, useState } from "react";
 
 type TargetLanguage =
   | "en-US"
@@ -13,21 +14,16 @@ type TargetLanguage =
   | "es-ES";
 
 type Tone = "calm" | "storytelling" | "podcast" | "academic" | "energetic";
+type Status = "idle" | "ready" | "generating" | "done";
 
-type JobStatus = "queued" | "processing" | "done" | "failed";
-
-interface AudioJob {
-  id: string;
+interface BookContent {
   fileName: string;
-  language: TargetLanguage;
-  tone: Tone;
-  status: JobStatus;
-  createdAt: string;
-  updatedAt: string;
-  sourceCharacters: number;
-  outputCharacters: number;
-  audioUrl?: string;
-  error?: string;
+  text: string;
+  characterCount: number;
+}
+
+interface SynthesizeResult {
+  outputPath: string;
 }
 
 const languages: Array<{ value: TargetLanguage; label: string }> = [
@@ -50,67 +46,92 @@ const tones: Array<{ value: Tone; label: string }> = [
 ];
 
 export function App() {
-  const [file, setFile] = useState<File | null>(null);
+  const [bookPath, setBookPath] = useState("");
+  const [book, setBook] = useState<BookContent | null>(null);
+  const [piperPath, setPiperPath] = useState("");
+  const [modelPath, setModelPath] = useState("");
+  const [outputPath, setOutputPath] = useState("");
   const [language, setLanguage] = useState<TargetLanguage>("zh-CN");
   const [tone, setTone] = useState<Tone>("storytelling");
-  const [jobs, setJobs] = useState<AudioJob[]>([]);
-  const [isUploading, setIsUploading] = useState(false);
+  const [status, setStatus] = useState<Status>("idle");
   const [error, setError] = useState<string | null>(null);
 
-  const activeJobs = useMemo(
-    () => jobs.some((job) => job.status === "queued" || job.status === "processing"),
-    [jobs]
-  );
+  const canGenerate = Boolean(book && piperPath && modelPath && outputPath && status !== "generating");
+  const estimatedMinutes = useMemo(() => {
+    if (!book) return 0;
+    return Math.max(1, Math.round(book.characterCount / 520));
+  }, [book]);
 
-  useEffect(() => {
-    void loadJobs();
-  }, []);
+  async function chooseBook() {
+    setError(null);
+    const selected = await pickPath({
+      title: "选择电子书",
+      filters: [{ name: "Text ebook", extensions: ["txt", "md", "markdown", "html", "htm"] }]
+    });
 
-  useEffect(() => {
-    if (!activeJobs) return;
+    if (!selected) return;
 
-    const timer = window.setInterval(() => {
-      void loadJobs();
-    }, 1500);
+    try {
+      const content = await invoke<BookContent>("read_book_file", { path: selected });
+      setBookPath(selected);
+      setBook(content);
+      setStatus("ready");
 
-    return () => window.clearInterval(timer);
-  }, [activeJobs]);
-
-  async function loadJobs() {
-    const response = await fetch(apiUrl("/api/jobs"));
-    const payload = (await response.json()) as { jobs: AudioJob[] };
-    setJobs(payload.jobs);
+      if (!outputPath) {
+        setOutputPath(defaultOutputPath(selected));
+      }
+    } catch (readError) {
+      setBook(null);
+      setBookPath("");
+      setStatus("idle");
+      setError(formatError(readError));
+    }
   }
 
-  async function submitJob(event: FormEvent) {
-    event.preventDefault();
-    if (!file) return;
+  async function choosePiper() {
+    const selected = await pickPath({ title: "选择 Piper 可执行文件" });
+    if (selected) setPiperPath(selected);
+  }
 
-    setIsUploading(true);
+  async function chooseModel() {
+    const selected = await pickPath({
+      title: "选择 Piper ONNX 模型",
+      filters: [{ name: "Piper model", extensions: ["onnx"] }]
+    });
+    if (selected) setModelPath(selected);
+  }
+
+  async function chooseOutput() {
+    const selected = await save({
+      title: "选择输出 WAV 文件",
+      defaultPath: outputPath || "ebook-audio.wav",
+      filters: [{ name: "WAV audio", extensions: ["wav"] }]
+    });
+    if (selected) setOutputPath(selected);
+  }
+
+  async function generateAudio() {
+    if (!book) return;
+
+    setStatus("generating");
     setError(null);
 
     try {
-      const body = new FormData();
-      body.append("ebook", file);
-      body.append("language", language);
-      body.append("tone", tone);
-
-      const response = await fetch(apiUrl("/api/jobs"), {
-        method: "POST",
-        body
+      const result = await invoke<SynthesizeResult>("synthesize_with_piper", {
+        request: {
+          piperPath,
+          modelPath,
+          outputPath,
+          text: book.text,
+          language,
+          tone
+        }
       });
-
-      const payload = await response.json();
-      if (!response.ok) {
-        throw new Error(payload.error ?? "上传失败");
-      }
-
-      setFile(null);
-      await loadJobs();
-    } catch (uploadError) {
-      setError(uploadError instanceof Error ? uploadError.message : "上传失败");
-    } finally {
-      setIsUploading(false);
+      setOutputPath(result.outputPath);
+      setStatus("done");
+    } catch (generateError) {
+      setStatus("ready");
+      setError(formatError(generateError));
     }
   }
 
@@ -120,20 +141,15 @@ export function App() {
         <div className="upload-panel">
           <div>
             <p className="eyebrow">Ebook Audio Studio</p>
-            <h1>把电子书转换成可离线收听的音频</h1>
+            <h1>本地模型生成电子书音频</h1>
           </div>
 
-          <form onSubmit={submitJob} className="upload-form">
-            <label className="drop-zone">
-              <Upload aria-hidden="true" />
-              <span>{file ? file.name : "选择电子书文件"}</span>
-              <small>支持 .txt / .md / .html，PDF 和 EPUB 已预留解析入口</small>
-              <input
-                type="file"
-                accept=".txt,.md,.markdown,.html,.htm,.pdf,.epub"
-                onChange={(event) => setFile(event.target.files?.[0] ?? null)}
-              />
-            </label>
+          <div className="upload-form">
+            <button type="button" className="picker-button" onClick={chooseBook}>
+              <FolderOpen aria-hidden="true" />
+              选择电子书
+            </button>
+            <PathValue label="当前文件" value={bookPath} placeholder="支持 .txt / .md / .html" />
 
             <div className="field-grid">
               <label>
@@ -159,72 +175,102 @@ export function App() {
               </label>
             </div>
 
+            <div className="model-grid">
+              <button type="button" className="ghost-button" onClick={choosePiper}>
+                <Settings2 aria-hidden="true" />
+                选择 Piper
+              </button>
+              <button type="button" className="ghost-button" onClick={chooseModel}>
+                <FileAudio aria-hidden="true" />
+                选择模型
+              </button>
+            </div>
+
+            <PathValue label="Piper 程序" value={piperPath} placeholder="例如 /opt/homebrew/bin/piper" />
+            <PathValue label="模型文件" value={modelPath} placeholder="选择 .onnx 模型" />
+
+            <button type="button" className="ghost-button" onClick={chooseOutput}>
+              <FileAudio aria-hidden="true" />
+              选择输出位置
+            </button>
+            <PathValue label="输出文件" value={outputPath} placeholder="生成的 .wav 会保存在这里" />
+
             {error ? <p className="error-text">{error}</p> : null}
 
-            <button type="submit" disabled={!file || isUploading}>
-              {isUploading ? <Loader2 className="spin" aria-hidden="true" /> : <FileAudio aria-hidden="true" />}
-              生成音频
+            <button type="button" disabled={!canGenerate} onClick={() => void generateAudio()}>
+              {status === "generating" ? <Loader2 className="spin" aria-hidden="true" /> : <FileAudio aria-hidden="true" />}
+              生成 WAV
             </button>
-          </form>
+          </div>
         </div>
 
         <div className="jobs-panel">
           <div className="panel-heading">
-            <h2>任务</h2>
-            <button type="button" className="ghost-button" onClick={() => void loadJobs()}>
-              刷新
-            </button>
+            <h2>本地任务</h2>
+            <span className="status-pill">{statusLabel(status)}</span>
           </div>
 
-          <div className="job-list">
-            {jobs.length === 0 ? (
-              <div className="empty-state">还没有任务</div>
-            ) : (
-              jobs.map((job) => <JobRow key={job.id} job={job} />)
-            )}
-          </div>
+          {book ? (
+            <article className="job-row">
+              <div className="job-main">
+                <FileText aria-hidden="true" />
+                <div>
+                  <h3>{book.fileName}</h3>
+                  <p>
+                    {book.characterCount.toLocaleString()} 字符 · 约 {estimatedMinutes} 分钟
+                  </p>
+                </div>
+              </div>
+
+              <div className="preview-text">{book.text.slice(0, 2000)}</div>
+
+              {status === "done" ? (
+                <div className="success-banner">
+                  <CheckCircle2 aria-hidden="true" />
+                  <span>已生成：{outputPath}</span>
+                </div>
+              ) : null}
+            </article>
+          ) : (
+            <div className="empty-state">选择电子书、Piper 程序和本地模型后开始生成</div>
+          )}
         </div>
       </section>
     </main>
   );
 }
 
-function JobRow({ job }: { job: AudioJob }) {
-  const audioUrl = job.audioUrl ? assetUrl(job.audioUrl) : undefined;
-
+function PathValue({ label, value, placeholder }: { label: string; value: string; placeholder: string }) {
   return (
-    <article className="job-row">
-      <div className="job-main">
-        <FileAudio aria-hidden="true" />
-        <div>
-          <h3>{job.fileName}</h3>
-          <p>
-            {job.language} · {job.tone} · {statusLabel(job.status)}
-          </p>
-          {job.error ? <p className="error-text">{job.error}</p> : null}
-        </div>
-      </div>
-
-      {job.status === "done" && audioUrl ? (
-        <div className="audio-actions">
-          <audio controls src={audioUrl} />
-          <a href={audioUrl} download>
-            <Download aria-hidden="true" />
-            下载
-          </a>
-        </div>
-      ) : null}
-    </article>
+    <div className="path-value">
+      <span>{label}</span>
+      <code>{value || placeholder}</code>
+    </div>
   );
 }
 
-function statusLabel(status: JobStatus) {
-  const labels: Record<JobStatus, string> = {
-    queued: "排队中",
-    processing: "处理中",
-    done: "已完成",
-    failed: "失败"
+async function pickPath(options: Parameters<typeof open>[0]) {
+  const selected = await open({ multiple: false, directory: false, ...options });
+  if (Array.isArray(selected)) return selected[0] ?? null;
+  return selected;
+}
+
+function defaultOutputPath(inputPath: string) {
+  const outputPath = inputPath.replace(/\.[^.\\/]+$/, ".wav");
+  return outputPath === inputPath ? `${inputPath}.wav` : outputPath;
+}
+
+function statusLabel(status: Status) {
+  const labels: Record<Status, string> = {
+    idle: "等待配置",
+    ready: "可以生成",
+    generating: "生成中",
+    done: "已完成"
   };
 
   return labels[status];
+}
+
+function formatError(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
 }

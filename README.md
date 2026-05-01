@@ -1,66 +1,56 @@
 # Ebook Audio Studio
 
-TypeScript full-stack app for turning ebooks into phone-friendly audio.
+Pure local Tauri desktop app for turning ebook text into audio with a user-owned TTS model.
 
-## Stack
+## Architecture
 
-- `pnpm` workspace
-- React + Vite client
-- Express + TypeScript server
-- Local storage for uploads and generated audio
-- Pluggable TTS provider
+- React + Vite UI
+- Tauri v2 desktop shell
+- Rust commands for local file access and process execution
+- Piper-compatible local TTS generation
+- No hosted backend, no API key, no project-owned server
 
 ## Current Flow
 
-1. Upload an ebook file from the web UI.
-2. Pick a target language and narration tone.
-3. Server extracts text and prepares it for narration.
-4. TTS provider generates an audio artifact.
-5. Browser shows a playable and downloadable result.
+1. Choose a `.txt`, `.md`, or `.html` ebook file.
+2. Choose the local `piper` executable.
+3. Choose a local Piper `.onnx` voice model.
+4. Choose where to save the output `.wav`.
+5. Generate audio using the user's own CPU/GPU resources.
 
-Text files, Markdown, and HTML can be processed immediately. PDF and EPUB have explicit hooks in `server/src/services/extractText.ts` for adding parsers.
+The app does not upload ebook text or audio anywhere.
 
-## Local TTS
+## Requirements
 
-Whisper is not used for TTS because Whisper is speech-to-text. For offline text-to-speech on macOS, set:
+- Node.js and pnpm for development
+- Rust toolchain for Tauri
+- A Piper executable installed locally
+- A Piper `.onnx` voice model downloaded locally
+
+Example setup:
 
 ```bash
-TTS_PROVIDER=macos
+pip install piper-tts
 ```
 
-The macOS provider uses `/usr/bin/say` and `/usr/bin/afconvert` to generate `.m4a` files.
+Then download a Piper voice model from the Piper voice model catalog and select it in the app.
 
 ## Development
 
 ```bash
 pnpm install
-cp server/.env.example server/.env
 pnpm dev
 ```
 
-Client: `http://localhost:5173`
-
-Server: `http://localhost:4100`
-
-## Environment
+## Build
 
 ```bash
-PORT=4100
-PUBLIC_BASE_URL=http://localhost:4100
-MAX_UPLOAD_MB=50
-TTS_PROVIDER=mock
+pnpm build
 ```
 
-Use `TTS_PROVIDER=macos` for local macOS audio generation.
+This creates a desktop bundle through Tauri.
 
-## GitHub Pages
+## Notes
 
-The repository includes a GitHub Actions workflow that builds `client/` and deploys the static frontend to GitHub Pages.
-
-GitHub Pages can host the React UI, but it cannot run the Express upload/TTS server. Deploy the server separately, then add a repository variable:
-
-```bash
-VITE_API_BASE_URL=https://your-api-host.example
-```
-
-When the Pages workflow builds the frontend, API calls and audio links will use that backend URL.
+- The language and tone controls are currently passed through to the local generation request as metadata. Actual language quality depends on the selected Piper model.
+- PDF and EPUB support are not enabled yet. They can be added with local parsers in the Rust command layer.

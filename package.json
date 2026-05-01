@@ -4,13 +4,15 @@
   "private": true,
   "packageManager": "pnpm@10.27.0",
   "scripts": {
-    "dev": "concurrently -n server,client -c cyan,magenta \"pnpm --filter server dev\" \"pnpm --filter client dev\"",
-    "build": "pnpm -r build",
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "web:dev": "pnpm --filter client dev",
+    "web:build": "pnpm --filter client build",
     "lint": "pnpm -r lint",
     "typecheck": "pnpm -r typecheck"
   },
   "devDependencies": {
-    "concurrently": "^9.1.2",
+    "@tauri-apps/cli": "^2.11.0",
     "typescript": "^5.8.3"
   }
 }
