@@ -12,20 +12,30 @@ Pure local Tauri desktop app for turning ebook text into audio with a user-owned
 
 ## Current Flow
 
-1. Choose a `.txt`, `.md`, or `.html` ebook file.
-2. Choose the local `piper` executable.
-3. Choose a local Piper `.onnx` voice model.
+1. Open the app.
+2. Download one of the recommended built-in voice models.
+3. Choose a `.txt`, `.md`, or `.html` ebook file.
 4. Choose where to save the output `.wav`.
-5. Generate audio using the user's own CPU/GPU resources.
+5. Generate audio using the user's own machine.
 
 The app does not upload ebook text or audio anywhere.
+
+## Built-In Setup
+
+The app includes a guided setup screen for non-technical users:
+
+- Shows supported voice models as cards.
+- Downloads the selected `.onnx` model and matching `.onnx.json` config into the app data directory.
+- Reads speaker mappings from the model config when available.
+- Auto-detects `piper` from the user's `PATH`.
+
+Advanced users can open Settings to manually choose a Piper executable or a custom `.onnx` model.
 
 ## Requirements
 
 - Node.js and pnpm for development
 - Rust toolchain for Tauri
-- A Piper executable installed locally
-- A Piper `.onnx` voice model downloaded locally
+- A Piper executable installed locally for now
 
 Example setup:
 
@@ -33,7 +43,7 @@ Example setup:
 pip install piper-tts
 ```
 
-Then download a Piper voice model from the Piper voice model catalog and select it in the app.
+Voice models can be downloaded from inside the app.
 
 ## Development
 
@@ -52,5 +62,6 @@ This creates a desktop bundle through Tauri.
 
 ## Notes
 
-- The language and tone controls are currently passed through to the local generation request as metadata. Actual language quality depends on the selected Piper model.
+- Actual language quality depends on the selected Piper model.
+- Tone is mapped to Piper speaking speed through `--length_scale`.
 - PDF and EPUB support are not enabled yet. They can be added with local parsers in the Rust command layer.

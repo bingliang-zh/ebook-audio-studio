@@ -1,18 +1,19 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { CheckCircle2, FileAudio, FileText, FolderOpen, Loader2, Settings2 } from "lucide-react";
-import { useMemo, useState } from "react";
+import {
+  CheckCircle2,
+  ChevronDown,
+  Download,
+  FileAudio,
+  FileText,
+  FolderOpen,
+  Loader2,
+  Settings2
+} from "lucide-react";
+import type { ReactNode } from "react";
+import { useEffect, useMemo, useState } from "react";
 
-type TargetLanguage =
-  | "en-US"
-  | "ja-JP"
-  | "ko-KR"
-  | "zh-CN"
-  | "zh-TW"
-  | "fr-FR"
-  | "de-DE"
-  | "es-ES";
-
+type TargetLanguage = "en-US" | "zh-CN" | "ja-JP" | "ko-KR" | "zh-TW" | "fr-FR" | "de-DE" | "es-ES";
 type Tone = "calm" | "storytelling" | "podcast" | "academic" | "energetic";
 type Status = "idle" | "ready" | "generating" | "done";
 
@@ -20,6 +21,33 @@ interface BookContent {
   fileName: string;
   text: string;
   characterCount: number;
+}
+
+interface BuiltinModel {
+  id: string;
+  name: string;
+  language: string;
+  quality: string;
+  size: string;
+  recommended: boolean;
+}
+
+interface LocalModel extends BuiltinModel {
+  modelPath: string;
+  configPath: string;
+  speakers: Speaker[];
+}
+
+interface Speaker {
+  id: number;
+  name: string;
+}
+
+interface SetupState {
+  piperPath?: string;
+  modelsDir: string;
+  builtinModels: BuiltinModel[];
+  localModels: LocalModel[];
 }
 
 interface SynthesizeResult {
@@ -46,21 +74,55 @@ const tones: Array<{ value: Tone; label: string }> = [
 ];
 
 export function App() {
+  const [setup, setSetup] = useState<SetupState | null>(null);
   const [bookPath, setBookPath] = useState("");
   const [book, setBook] = useState<BookContent | null>(null);
-  const [piperPath, setPiperPath] = useState("");
-  const [modelPath, setModelPath] = useState("");
+  const [manualPiperPath, setManualPiperPath] = useState("");
+  const [manualModelPath, setManualModelPath] = useState("");
+  const [selectedModelId, setSelectedModelId] = useState("");
+  const [speakerId, setSpeakerId] = useState("");
   const [outputPath, setOutputPath] = useState("");
   const [language, setLanguage] = useState<TargetLanguage>("zh-CN");
   const [tone, setTone] = useState<Tone>("storytelling");
   const [status, setStatus] = useState<Status>("idle");
+  const [isDownloading, setIsDownloading] = useState<string | null>(null);
+  const [showSettings, setShowSettings] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const canGenerate = Boolean(book && piperPath && modelPath && outputPath && status !== "generating");
+  useEffect(() => {
+    void refreshSetup();
+  }, []);
+
+  useEffect(() => {
+    if (!setup || selectedModelId) return;
+
+    const recommendedLocal = setup.localModels.find((model) => model.recommended) ?? setup.localModels[0];
+    if (recommendedLocal) {
+      setSelectedModelId(recommendedLocal.id);
+      setLanguage(recommendedLocal.language as TargetLanguage);
+    }
+  }, [selectedModelId, setup]);
+
+  const selectedModel = useMemo(
+    () => setup?.localModels.find((model) => model.id === selectedModelId),
+    [selectedModelId, setup]
+  );
+  const piperPath = manualPiperPath || setup?.piperPath || "";
+  const modelPath = manualModelPath || selectedModel?.modelPath || "";
+  const canGenerate = Boolean(book && outputPath && piperPath && (selectedModelId || manualModelPath) && status !== "generating");
   const estimatedMinutes = useMemo(() => {
     if (!book) return 0;
     return Math.max(1, Math.round(book.characterCount / 520));
   }, [book]);
+
+  async function refreshSetup() {
+    try {
+      const state = await invoke<SetupState>("get_setup_state");
+      setSetup(state);
+    } catch (setupError) {
+      setError(formatError(setupError));
+    }
+  }
 
   async function chooseBook() {
     setError(null);
@@ -88,9 +150,25 @@ export function App() {
     }
   }
 
+  async function downloadModel(modelId: string) {
+    setError(null);
+    setIsDownloading(modelId);
+
+    try {
+      const model = await invoke<LocalModel>("download_builtin_model", { modelId });
+      await refreshSetup();
+      setSelectedModelId(model.id);
+      setLanguage(model.language as TargetLanguage);
+    } catch (downloadError) {
+      setError(formatError(downloadError));
+    } finally {
+      setIsDownloading(null);
+    }
+  }
+
   async function choosePiper() {
     const selected = await pickPath({ title: "选择 Piper 可执行文件" });
-    if (selected) setPiperPath(selected);
+    if (selected) setManualPiperPath(selected);
   }
 
   async function chooseModel() {
@@ -98,7 +176,11 @@ export function App() {
       title: "选择 Piper ONNX 模型",
       filters: [{ name: "Piper model", extensions: ["onnx"] }]
     });
-    if (selected) setModelPath(selected);
+    if (selected) {
+      setManualModelPath(selected);
+      setSelectedModelId("");
+      setSpeakerId("");
+    }
   }
 
   async function chooseOutput() {
@@ -119,8 +201,10 @@ export function App() {
     try {
       const result = await invoke<SynthesizeResult>("synthesize_with_piper", {
         request: {
-          piperPath,
-          modelPath,
+          piperPath: piperPath || null,
+          modelId: manualModelPath ? null : selectedModelId,
+          modelPath: manualModelPath || null,
+          speakerId: speakerId ? Number(speakerId) : null,
           outputPath,
           text: book.text,
           language,
@@ -141,67 +225,135 @@ export function App() {
         <div className="upload-panel">
           <div>
             <p className="eyebrow">Ebook Audio Studio</p>
-            <h1>本地模型生成电子书音频</h1>
+            <h1>开箱即用的本地电子书转音频</h1>
           </div>
 
-          <div className="upload-form">
-            <button type="button" className="picker-button" onClick={chooseBook}>
-              <FolderOpen aria-hidden="true" />
-              选择电子书
-            </button>
-            <PathValue label="当前文件" value={bookPath} placeholder="支持 .txt / .md / .html" />
+          <div className="setup-stack">
+            <SetupStep index="1" title="准备声音模型">
+              <EngineStatus piperPath={piperPath} onChoose={choosePiper} />
+            </SetupStep>
 
-            <div className="field-grid">
-              <label>
-                <span>目标语言</span>
-                <select value={language} onChange={(event) => setLanguage(event.target.value as TargetLanguage)}>
-                  {languages.map((item) => (
-                    <option key={item.value} value={item.value}>
-                      {item.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
+            <SetupStep index="2" title="下载声音模型">
+              <div className="model-list">
+                {setup?.builtinModels.map((model) => {
+                  const local = setup.localModels.find((item) => item.id === model.id);
+                  const isActive = selectedModelId === model.id;
 
-              <label>
-                <span>Tone</span>
-                <select value={tone} onChange={(event) => setTone(event.target.value as Tone)}>
-                  {tones.map((item) => (
-                    <option key={item.value} value={item.value}>
-                      {item.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
+                  return (
+                    <button
+                      key={model.id}
+                      type="button"
+                      className={`model-card ${isActive ? "is-active" : ""}`}
+                      onClick={() => {
+                        if (local) {
+                          setSelectedModelId(local.id);
+                          setManualModelPath("");
+                          setLanguage(local.language as TargetLanguage);
+                        } else {
+                          void downloadModel(model.id);
+                        }
+                      }}
+                    >
+                      <span>
+                        <strong>{model.name}</strong>
+                        <small>
+                          {model.quality} · {model.size}
+                        </small>
+                      </span>
+                      {local ? (
+                        <CheckCircle2 aria-hidden="true" />
+                      ) : isDownloading === model.id ? (
+                        <Loader2 className="spin" aria-hidden="true" />
+                      ) : (
+                        <Download aria-hidden="true" />
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            </SetupStep>
 
-            <div className="model-grid">
-              <button type="button" className="ghost-button" onClick={choosePiper}>
-                <Settings2 aria-hidden="true" />
-                选择 Piper
+            <SetupStep index="3" title="选择电子书">
+              <button type="button" className="picker-button" onClick={chooseBook}>
+                <FolderOpen aria-hidden="true" />
+                选择 .txt / .md / .html
               </button>
-              <button type="button" className="ghost-button" onClick={chooseModel}>
+              <PathValue value={bookPath} placeholder="还没有选择电子书" />
+            </SetupStep>
+
+            <SetupStep index="4" title="生成音频">
+              <div className="field-grid">
+                <label>
+                  <span>语言</span>
+                  <select value={language} onChange={(event) => setLanguage(event.target.value as TargetLanguage)}>
+                    {languages.map((item) => (
+                      <option key={item.value} value={item.value}>
+                        {item.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label>
+                  <span>Tone</span>
+                  <select value={tone} onChange={(event) => setTone(event.target.value as Tone)}>
+                    {tones.map((item) => (
+                      <option key={item.value} value={item.value}>
+                        {item.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+
+              {selectedModel?.speakers.length ? (
+                <label className="full-field">
+                  <span>Speaker</span>
+                  <select value={speakerId} onChange={(event) => setSpeakerId(event.target.value)}>
+                    <option value="">默认 speaker</option>
+                    {selectedModel.speakers.map((speaker) => (
+                      <option key={speaker.id} value={speaker.id}>
+                        {speaker.name} · #{speaker.id}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : null}
+
+              <button type="button" className="ghost-button" onClick={chooseOutput}>
                 <FileAudio aria-hidden="true" />
-                选择模型
+                选择输出位置
+              </button>
+              <PathValue value={outputPath} placeholder="生成的 .wav 会保存在这里" />
+
+              {error ? <p className="error-text">{error}</p> : null}
+
+              <button type="button" disabled={!canGenerate} onClick={() => void generateAudio()}>
+                {status === "generating" ? <Loader2 className="spin" aria-hidden="true" /> : <FileAudio aria-hidden="true" />}
+                生成 WAV
+              </button>
+            </SetupStep>
+          </div>
+
+          <button type="button" className="settings-toggle" onClick={() => setShowSettings((value) => !value)}>
+            <Settings2 aria-hidden="true" />
+            Settings
+            <ChevronDown aria-hidden="true" />
+          </button>
+
+          {showSettings ? (
+            <div className="settings-panel">
+              <PathValue label="Piper" value={piperPath} placeholder="未检测到 Piper，请手动选择" />
+              <button type="button" className="ghost-button" onClick={choosePiper}>
+                选择 Piper 程序
+              </button>
+              <PathValue label="模型目录" value={setup?.modelsDir ?? ""} placeholder="模型目录加载中" />
+              <PathValue label="当前模型" value={modelPath} placeholder="未选择模型" />
+              <button type="button" className="ghost-button" onClick={chooseModel}>
+                手动选择 .onnx 模型
               </button>
             </div>
-
-            <PathValue label="Piper 程序" value={piperPath} placeholder="例如 /opt/homebrew/bin/piper" />
-            <PathValue label="模型文件" value={modelPath} placeholder="选择 .onnx 模型" />
-
-            <button type="button" className="ghost-button" onClick={chooseOutput}>
-              <FileAudio aria-hidden="true" />
-              选择输出位置
-            </button>
-            <PathValue label="输出文件" value={outputPath} placeholder="生成的 .wav 会保存在这里" />
-
-            {error ? <p className="error-text">{error}</p> : null}
-
-            <button type="button" disabled={!canGenerate} onClick={() => void generateAudio()}>
-              {status === "generating" ? <Loader2 className="spin" aria-hidden="true" /> : <FileAudio aria-hidden="true" />}
-              生成 WAV
-            </button>
-          </div>
+          ) : null}
         </div>
 
         <div className="jobs-panel">
@@ -232,7 +384,7 @@ export function App() {
               ) : null}
             </article>
           ) : (
-            <div className="empty-state">选择电子书、Piper 程序和本地模型后开始生成</div>
+            <div className="empty-state">下载一个模型，选择电子书，然后生成 WAV</div>
           )}
         </div>
       </section>
@@ -240,10 +392,43 @@ export function App() {
   );
 }
 
-function PathValue({ label, value, placeholder }: { label: string; value: string; placeholder: string }) {
+function SetupStep({ index, title, children }: { index: string; title: string; children: ReactNode }) {
+  return (
+    <section className="setup-step">
+      <div className="step-heading">
+        <span>{index}</span>
+        <h2>{title}</h2>
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function EngineStatus({ piperPath, onChoose }: { piperPath: string; onChoose: () => void }) {
+  if (piperPath) {
+    return (
+      <div className="engine-status is-ready">
+        <CheckCircle2 aria-hidden="true" />
+        <span>已找到本机 Piper 引擎</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="engine-status">
+      <Settings2 aria-hidden="true" />
+      <span>未检测到 Piper。可以先安装 Piper，或在 Settings 里选择已有程序。</span>
+      <button type="button" className="ghost-button" onClick={onChoose}>
+        选择 Piper
+      </button>
+    </div>
+  );
+}
+
+function PathValue({ label, value, placeholder }: { label?: string; value: string; placeholder: string }) {
   return (
     <div className="path-value">
-      <span>{label}</span>
+      {label ? <span>{label}</span> : null}
       <code>{value || placeholder}</code>
     </div>
   );
