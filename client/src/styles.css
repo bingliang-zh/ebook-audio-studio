@@ -167,6 +167,16 @@ h1 {
   color: #637368;
 }
 
+.encoder-card {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #dce2d9;
+  border-radius: 8px;
+  background: #fff8e6;
+  color: #5e4a12;
+}
+
 .picker-button {
   width: 100%;
 }
@@ -337,6 +347,10 @@ h3 {
   background: #ffffff;
   color: #2f3c35;
   line-height: 1.7;
+}
+
+.audio-preview {
+  width: 100%;
 }
 
 .success-banner {

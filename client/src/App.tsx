@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import {
   CheckCircle2,
@@ -16,6 +16,7 @@ import { useEffect, useMemo, useState } from "react";
 type TargetLanguage = "en-US" | "zh-CN" | "ja-JP" | "ko-KR" | "zh-TW" | "fr-FR" | "de-DE" | "es-ES";
 type Tone = "calm" | "storytelling" | "podcast" | "academic" | "energetic";
 type Status = "idle" | "ready" | "generating" | "done";
+type OutputFormat = "mp3" | "wav";
 
 interface BookContent {
   fileName: string;
@@ -45,6 +46,7 @@ interface Speaker {
 
 interface SetupState {
   piperPath?: string;
+  ffmpegPath?: string;
   modelsDir: string;
   builtinModels: BuiltinModel[];
   localModels: LocalModel[];
@@ -82,11 +84,15 @@ export function App() {
   const [selectedModelId, setSelectedModelId] = useState("");
   const [speakerId, setSpeakerId] = useState("");
   const [outputPath, setOutputPath] = useState("");
+  const [outputFormat, setOutputFormat] = useState<OutputFormat>("mp3");
   const [language, setLanguage] = useState<TargetLanguage>("zh-CN");
   const [tone, setTone] = useState<Tone>("storytelling");
   const [status, setStatus] = useState<Status>("idle");
   const [isDownloadingEngine, setIsDownloadingEngine] = useState(false);
+  const [isDownloadingEncoder, setIsDownloadingEncoder] = useState(false);
   const [isDownloading, setIsDownloading] = useState<string | null>(null);
+  const [isPreviewing, setIsPreviewing] = useState(false);
+  const [previewUrl, setPreviewUrl] = useState("");
   const [showSettings, setShowSettings] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -109,8 +115,15 @@ export function App() {
     [selectedModelId, setup]
   );
   const piperPath = manualPiperPath || setup?.piperPath || "";
+  const ffmpegPath = setup?.ffmpegPath || "";
   const modelPath = manualModelPath || selectedModel?.modelPath || "";
-  const canGenerate = Boolean(book && outputPath && piperPath && (selectedModelId || manualModelPath) && status !== "generating");
+  const hasEncoderForFormat = outputFormat === "wav" || Boolean(ffmpegPath);
+  const canGenerate = Boolean(
+    book && outputPath && piperPath && hasEncoderForFormat && (selectedModelId || manualModelPath) && status !== "generating"
+  );
+  const canPreview = Boolean(
+    piperPath && hasEncoderForFormat && (selectedModelId || manualModelPath) && !isPreviewing && status !== "generating"
+  );
   const estimatedMinutes = useMemo(() => {
     if (!book) return 0;
     return Math.max(1, Math.round(book.characterCount / 520));
@@ -141,7 +154,7 @@ export function App() {
       setStatus("ready");
 
       if (!outputPath) {
-        setOutputPath(defaultOutputPath(selected));
+        setOutputPath(defaultOutputPath(selected, outputFormat));
       }
     } catch (readError) {
       setBook(null);
@@ -182,6 +195,20 @@ export function App() {
     }
   }
 
+  async function downloadEncoder() {
+    setError(null);
+    setIsDownloadingEncoder(true);
+
+    try {
+      await invoke<string>("download_ffmpeg_encoder");
+      await refreshSetup();
+    } catch (downloadError) {
+      setError(formatError(downloadError));
+    } finally {
+      setIsDownloadingEncoder(false);
+    }
+  }
+
   async function choosePiper() {
     const selected = await pickPath({ title: "选择 Piper 可执行文件" });
     if (selected) setManualPiperPath(selected);
@@ -201,11 +228,43 @@ export function App() {
 
   async function chooseOutput() {
     const selected = await save({
-      title: "选择输出 WAV 文件",
-      defaultPath: outputPath || "ebook-audio.wav",
-      filters: [{ name: "WAV audio", extensions: ["wav"] }]
+      title: `选择输出 ${outputFormat.toUpperCase()} 文件`,
+      defaultPath: outputPath || `ebook-audio.${outputFormat}`,
+      filters:
+        outputFormat === "mp3"
+          ? [{ name: "MP3 audio", extensions: ["mp3"] }]
+          : [{ name: "WAV audio", extensions: ["wav"] }]
     });
     if (selected) setOutputPath(selected);
+  }
+
+  function changeOutputFormat(format: OutputFormat) {
+    setOutputFormat(format);
+    setPreviewUrl("");
+    if (outputPath) {
+      setOutputPath(replaceExtension(outputPath, format));
+    } else if (bookPath) {
+      setOutputPath(defaultOutputPath(bookPath, format));
+    }
+  }
+
+  async function previewAudio() {
+    const text = book?.text || previewText(language);
+
+    setIsPreviewing(true);
+    setError(null);
+    setPreviewUrl("");
+
+    try {
+      const result = await invoke<SynthesizeResult>("synthesize_preview", {
+        request: buildSynthesizeRequest(text, "")
+      });
+      setPreviewUrl(convertFileSrc(result.outputPath));
+    } catch (previewError) {
+      setError(formatError(previewError));
+    } finally {
+      setIsPreviewing(false);
+    }
   }
 
   async function generateAudio() {
@@ -216,16 +275,7 @@ export function App() {
 
     try {
       const result = await invoke<SynthesizeResult>("synthesize_with_piper", {
-        request: {
-          piperPath: piperPath || null,
-          modelId: manualModelPath ? null : selectedModelId,
-          modelPath: manualModelPath || null,
-          speakerId: speakerId ? Number(speakerId) : null,
-          outputPath,
-          text: book.text,
-          language,
-          tone
-        }
+        request: buildSynthesizeRequest(book.text, outputPath)
       });
       setOutputPath(result.outputPath);
       setStatus("done");
@@ -233,6 +283,20 @@ export function App() {
       setStatus("ready");
       setError(formatError(generateError));
     }
+  }
+
+  function buildSynthesizeRequest(text: string, targetOutputPath: string) {
+    return {
+      piperPath: piperPath || null,
+      modelId: manualModelPath ? null : selectedModelId,
+      modelPath: manualModelPath || null,
+      speakerId: speakerId ? Number(speakerId) : null,
+      outputPath: targetOutputPath,
+      outputFormat,
+      text,
+      language,
+      tone
+    };
   }
 
   return (
@@ -316,6 +380,16 @@ export function App() {
                 </label>
 
                 <label>
+                  <span>格式</span>
+                  <select value={outputFormat} onChange={(event) => changeOutputFormat(event.target.value as OutputFormat)}>
+                    <option value="mp3">MP3</option>
+                    <option value="wav">WAV</option>
+                  </select>
+                </label>
+              </div>
+
+              <div className="field-grid">
+                <label>
                   <span>Tone</span>
                   <select value={tone} onChange={(event) => setTone(event.target.value as Tone)}>
                     {tones.map((item) => (
@@ -326,6 +400,16 @@ export function App() {
                   </select>
                 </label>
               </div>
+
+              {outputFormat === "mp3" && !ffmpegPath ? (
+                <div className="encoder-card">
+                  <span>MP3 需要下载一次编码器。</span>
+                  <button type="button" onClick={() => void downloadEncoder()} disabled={isDownloadingEncoder}>
+                    {isDownloadingEncoder ? <Loader2 className="spin" aria-hidden="true" /> : <Download aria-hidden="true" />}
+                    下载 MP3 编码器
+                  </button>
+                </div>
+              ) : null}
 
               {selectedModel?.speakers.length ? (
                 <label className="full-field">
@@ -345,13 +429,23 @@ export function App() {
                 <FileAudio aria-hidden="true" />
                 选择输出位置
               </button>
-              <PathValue value={outputPath} placeholder="生成的 .wav 会保存在这里" />
+              <PathValue value={outputPath} placeholder={`生成的 .${outputFormat} 会保存在这里`} />
 
               {error ? <p className="error-text">{error}</p> : null}
 
+              <button type="button" className="ghost-button" disabled={!canPreview} onClick={() => void previewAudio()}>
+                {isPreviewing ? <Loader2 className="spin" aria-hidden="true" /> : <FileAudio aria-hidden="true" />}
+                预览声音
+              </button>
+              {previewUrl ? (
+                <audio className="audio-preview" controls src={previewUrl}>
+                  你的系统不支持音频预览。
+                </audio>
+              ) : null}
+
               <button type="button" disabled={!canGenerate} onClick={() => void generateAudio()}>
                 {status === "generating" ? <Loader2 className="spin" aria-hidden="true" /> : <FileAudio aria-hidden="true" />}
-                生成 WAV
+                生成 {outputFormat.toUpperCase()}
               </button>
             </SetupStep>
           </div>
@@ -365,6 +459,7 @@ export function App() {
           {showSettings ? (
             <div className="settings-panel">
               <PathValue label="Piper" value={piperPath} placeholder="未检测到 Piper，请手动选择" />
+              <PathValue label="MP3 编码器" value={ffmpegPath} placeholder="未检测到 FFmpeg，选择 MP3 时可一键下载" />
               <button type="button" className="ghost-button" onClick={choosePiper}>
                 选择 Piper 程序
               </button>
@@ -405,7 +500,7 @@ export function App() {
               ) : null}
             </article>
           ) : (
-            <div className="empty-state">下载一个模型，选择电子书，然后生成 WAV</div>
+            <div className="empty-state">下载一个模型，选择电子书，然后生成音频</div>
           )}
         </div>
       </section>
@@ -475,9 +570,21 @@ async function pickPath(options: Parameters<typeof open>[0]) {
   return selected;
 }
 
-function defaultOutputPath(inputPath: string) {
-  const outputPath = inputPath.replace(/\.[^.\\/]+$/, ".wav");
-  return outputPath === inputPath ? `${inputPath}.wav` : outputPath;
+function defaultOutputPath(inputPath: string, format: OutputFormat) {
+  return replaceExtension(inputPath, format);
+}
+
+function replaceExtension(inputPath: string, format: OutputFormat) {
+  const outputPath = inputPath.replace(/\.[^.\\/]+$/, `.${format}`);
+  return outputPath === inputPath ? `${inputPath}.${format}` : outputPath;
+}
+
+function previewText(language: TargetLanguage) {
+  if (language === "zh-CN" || language === "zh-TW") {
+    return "这是一段声音预览。你可以用它检查语速、语气和说话人是否适合长时间收听。";
+  }
+
+  return "This is a short voice preview. Use it to check the voice, tone, and speaking speed before generating the full audiobook.";
 }
 
 function statusLabel(status: Status) {

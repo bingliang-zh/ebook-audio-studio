@@ -25,6 +25,7 @@ struct SynthesizeRequest {
     model_path: Option<String>,
     speaker_id: Option<i64>,
     output_path: String,
+    output_format: String,
     text: String,
     language: String,
     tone: String,
@@ -74,6 +75,7 @@ struct Speaker {
 #[serde(rename_all = "camelCase")]
 struct SetupState {
     piper_path: Option<String>,
+    ffmpeg_path: Option<String>,
     models_dir: String,
     builtin_models: Vec<BuiltinModel>,
     local_models: Vec<LocalModel>,
@@ -125,6 +127,7 @@ fn get_setup_state(app: AppHandle) -> Result<SetupState, String> {
 
     Ok(SetupState {
         piper_path: find_piper(&app),
+        ffmpeg_path: find_ffmpeg(&app),
         models_dir: models_dir.to_string_lossy().to_string(),
         builtin_models: builtin_models(),
         local_models: local_models(&app)?,
@@ -160,6 +163,34 @@ fn download_piper_engine(app: AppHandle) -> Result<String, String> {
 }
 
 #[tauri::command]
+fn download_ffmpeg_encoder(app: AppHandle) -> Result<String, String> {
+    let package = ffmpeg_package()?;
+    let encoder_dir = encoder_dir(&app)?;
+    fs::create_dir_all(&encoder_dir)
+        .map_err(|error| format!("Failed to create encoder directory: {error}"))?;
+
+    let binary_name = if cfg!(windows) {
+        "ffmpeg.exe"
+    } else {
+        "ffmpeg"
+    };
+    let ffmpeg_path = encoder_dir.join(binary_name);
+    download_file(package.url, &ffmpeg_path)?;
+
+    #[cfg(unix)]
+    {
+        let mut permissions = fs::metadata(&ffmpeg_path)
+            .map_err(|error| format!("Failed to inspect FFmpeg executable: {error}"))?
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&ffmpeg_path, permissions)
+            .map_err(|error| format!("Failed to make FFmpeg executable: {error}"))?;
+    }
+
+    Ok(ffmpeg_path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
 fn download_builtin_model(app: AppHandle, model_id: String) -> Result<LocalModel, String> {
     let model = builtin_models()
         .into_iter()
@@ -186,7 +217,7 @@ fn synthesize_with_piper(
 ) -> Result<SynthesizeResult, String> {
     let piper_path = resolve_piper_path(&app, request.piper_path.as_deref())?;
     let model_path = resolve_model_path(&app, &request)?;
-    let output_path = Path::new(&request.output_path);
+    let output_path = PathBuf::from(&request.output_path);
 
     if !piper_path.exists() {
         return Err("Piper executable does not exist.".to_string());
@@ -204,16 +235,88 @@ fn synthesize_with_piper(
         return Err("A target language is required.".to_string());
     }
 
-    let prepared_text = prepare_text_for_tts(&request.text);
-    let length_scale = length_scale_for_tone(&request.tone);
+    synthesize_text(
+        &app,
+        &piper_path,
+        &model_path,
+        request.speaker_id,
+        &output_path,
+        &request.output_format,
+        &request.text,
+        &request.tone,
+    )?;
+
+    Ok(SynthesizeResult {
+        output_path: output_path.to_string_lossy().to_string(),
+    })
+}
+
+#[tauri::command]
+fn synthesize_preview(
+    app: AppHandle,
+    request: SynthesizeRequest,
+) -> Result<SynthesizeResult, String> {
+    let piper_path = resolve_piper_path(&app, request.piper_path.as_deref())?;
+    let model_path = resolve_model_path(&app, &request)?;
+    let preview_dir = app
+        .path()
+        .app_cache_dir()
+        .map(|path| path.join("previews"))
+        .map_err(|error| format!("Failed to resolve preview directory: {error}"))?;
+    fs::create_dir_all(&preview_dir)
+        .map_err(|error| format!("Failed to create preview directory: {error}"))?;
+
+    let extension = extension_for_format(&request.output_format)?;
+    let output_path = preview_dir.join(format!("preview.{extension}"));
+    let preview_text = request.text.chars().take(360).collect::<String>();
+
+    synthesize_text(
+        &app,
+        &piper_path,
+        &model_path,
+        request.speaker_id,
+        &output_path,
+        &request.output_format,
+        &preview_text,
+        &request.tone,
+    )?;
+
+    Ok(SynthesizeResult {
+        output_path: output_path.to_string_lossy().to_string(),
+    })
+}
+
+fn synthesize_text(
+    app: &AppHandle,
+    piper_path: &Path,
+    model_path: &Path,
+    speaker_id: Option<i64>,
+    output_path: &Path,
+    output_format: &str,
+    text: &str,
+    tone: &str,
+) -> Result<(), String> {
+    if text.trim().is_empty() {
+        return Err("There is no text to synthesize.".to_string());
+    }
+
+    let output_format = normalized_format(output_format)?;
+    let wav_path = if output_format == "wav" {
+        output_path.to_path_buf()
+    } else {
+        output_path.with_extension("tmp.wav")
+    };
+
+    let prepared_text = prepare_text_for_tts(text);
+    let length_scale = length_scale_for_tone(tone);
     let mut child = Command::new(piper_path)
         .arg("--model")
         .arg(model_path)
-        .args(speaker_args(request.speaker_id))
+        .args(speaker_args(speaker_id))
         .arg("--length_scale")
         .arg(length_scale)
         .arg("--output_file")
-        .arg(output_path)
+        .arg(&wav_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -235,9 +338,12 @@ fn synthesize_with_piper(
         return Err(format!("Piper failed: {}", stderr.trim()));
     }
 
-    Ok(SynthesizeResult {
-        output_path: output_path.to_string_lossy().to_string(),
-    })
+    if output_format == "mp3" {
+        convert_wav_to_mp3(app, &wav_path, output_path)?;
+        let _ = fs::remove_file(&wav_path);
+    }
+
+    Ok(())
 }
 
 fn normalize_text(raw: &str, is_html: bool) -> String {
@@ -345,9 +451,83 @@ fn engine_dir(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|error| format!("Failed to resolve app data directory: {error}"))
 }
 
+fn encoder_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map(|path| path.join("encoder"))
+        .map_err(|error| format!("Failed to resolve app data directory: {error}"))
+}
+
 struct PiperPackage {
     url: &'static str,
     file_name: &'static str,
+}
+
+struct FfmpegPackage {
+    url: &'static str,
+}
+
+fn ffmpeg_package() -> Result<FfmpegPackage, String> {
+    let os = env::consts::OS;
+    let arch = env::consts::ARCH;
+
+    match (os, arch) {
+        ("macos", "aarch64") => Ok(FfmpegPackage {
+            url: "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-darwin-arm64",
+        }),
+        ("macos", "x86_64") => Ok(FfmpegPackage {
+            url: "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-darwin-x64",
+        }),
+        ("linux", "x86_64") => Ok(FfmpegPackage {
+            url: "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-linux-x64",
+        }),
+        ("linux", "aarch64") => Ok(FfmpegPackage {
+            url: "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-linux-arm64",
+        }),
+        ("windows", "x86_64") => Ok(FfmpegPackage {
+            url: "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-win32-x64",
+        }),
+        _ => Err(format!("Automatic FFmpeg download is not available for {os}/{arch}.")),
+    }
+}
+
+fn normalized_format(format: &str) -> Result<&'static str, String> {
+    match format {
+        "mp3" => Ok("mp3"),
+        "wav" | "" => Ok("wav"),
+        _ => Err("Unsupported output format. Choose WAV or MP3.".to_string()),
+    }
+}
+
+fn extension_for_format(format: &str) -> Result<&'static str, String> {
+    normalized_format(format)
+}
+
+fn convert_wav_to_mp3(app: &AppHandle, wav_path: &Path, mp3_path: &Path) -> Result<(), String> {
+    let ffmpeg_path = find_ffmpeg(app)
+        .map(PathBuf::from)
+        .ok_or_else(|| "MP3 output requires FFmpeg. Download the MP3 encoder first.".to_string())?;
+
+    let output = Command::new(ffmpeg_path)
+        .arg("-y")
+        .arg("-i")
+        .arg(wav_path)
+        .arg("-codec:a")
+        .arg("libmp3lame")
+        .arg("-b:a")
+        .arg("128k")
+        .arg(mp3_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|error| format!("Failed to start FFmpeg: {error}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("FFmpeg failed: {}", stderr.trim()));
+    }
+
+    Ok(())
 }
 
 fn piper_package() -> Result<PiperPackage, String> {
@@ -541,6 +721,35 @@ fn find_piper(app: &AppHandle) -> Option<String> {
         .or_else(find_piper_in_path)
 }
 
+fn find_ffmpeg(app: &AppHandle) -> Option<String> {
+    encoder_dir(app)
+        .ok()
+        .map(|path| {
+            path.join(if cfg!(windows) {
+                "ffmpeg.exe"
+            } else {
+                "ffmpeg"
+            })
+        })
+        .filter(|candidate| candidate.exists())
+        .map(|path| path.to_string_lossy().to_string())
+        .or_else(find_ffmpeg_in_path)
+}
+
+fn find_ffmpeg_in_path() -> Option<String> {
+    let executable = if cfg!(windows) {
+        "ffmpeg.exe"
+    } else {
+        "ffmpeg"
+    };
+    let path_var = env::var_os("PATH")?;
+
+    env::split_paths(&path_var)
+        .map(|path| path.join(executable))
+        .find(|candidate| candidate.exists())
+        .map(|candidate| candidate.to_string_lossy().to_string())
+}
+
 fn find_piper_in_path() -> Option<String> {
     let executable = if cfg!(windows) { "piper.exe" } else { "piper" };
     let path_var = env::var_os("PATH")?;
@@ -579,8 +788,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_setup_state,
             download_piper_engine,
+            download_ffmpeg_encoder,
             download_builtin_model,
             read_book_file,
+            synthesize_preview,
             synthesize_with_piper
         ])
         .run(tauri::generate_context!())
