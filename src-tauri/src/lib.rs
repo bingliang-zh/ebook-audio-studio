@@ -1,4 +1,6 @@
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::{
     env, fs,
     io::{Read, Write},
@@ -122,11 +124,39 @@ fn get_setup_state(app: AppHandle) -> Result<SetupState, String> {
         .map_err(|error| format!("Failed to create model directory: {error}"))?;
 
     Ok(SetupState {
-        piper_path: find_piper_in_path(),
+        piper_path: find_piper(&app),
         models_dir: models_dir.to_string_lossy().to_string(),
         builtin_models: builtin_models(),
         local_models: local_models(&app)?,
     })
+}
+
+#[tauri::command]
+fn download_piper_engine(app: AppHandle) -> Result<String, String> {
+    let package = piper_package()?;
+    let engine_dir = engine_dir(&app)?;
+    fs::create_dir_all(&engine_dir)
+        .map_err(|error| format!("Failed to create engine directory: {error}"))?;
+
+    let archive_path = engine_dir.join(package.file_name);
+    download_file(package.url, &archive_path)?;
+    extract_archive(&archive_path, &engine_dir)?;
+
+    let piper_path = find_piper_in_dir(&engine_dir).ok_or_else(|| {
+        "Downloaded Piper package did not contain a Piper executable.".to_string()
+    })?;
+
+    #[cfg(unix)]
+    {
+        let mut permissions = fs::metadata(&piper_path)
+            .map_err(|error| format!("Failed to inspect Piper executable: {error}"))?
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&piper_path, permissions)
+            .map_err(|error| format!("Failed to make Piper executable: {error}"))?;
+    }
+
+    Ok(piper_path.to_string_lossy().to_string())
 }
 
 #[tauri::command]
@@ -154,7 +184,7 @@ fn synthesize_with_piper(
     app: AppHandle,
     request: SynthesizeRequest,
 ) -> Result<SynthesizeResult, String> {
-    let piper_path = resolve_piper_path(request.piper_path.as_deref())?;
+    let piper_path = resolve_piper_path(&app, request.piper_path.as_deref())?;
     let model_path = resolve_model_path(&app, &request)?;
     let output_path = Path::new(&request.output_path);
 
@@ -265,12 +295,12 @@ fn speaker_args(speaker_id: Option<i64>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn resolve_piper_path(configured_path: Option<&str>) -> Result<PathBuf, String> {
+fn resolve_piper_path(app: &AppHandle, configured_path: Option<&str>) -> Result<PathBuf, String> {
     if let Some(path) = configured_path.filter(|value| !value.trim().is_empty()) {
         return Ok(PathBuf::from(path));
     }
 
-    find_piper_in_path().map(PathBuf::from).ok_or_else(|| {
+    find_piper(app).map(PathBuf::from).ok_or_else(|| {
         "Piper was not found. Install Piper or choose its executable in Settings.".to_string()
     })
 }
@@ -306,6 +336,78 @@ fn models_dir(app: &AppHandle) -> Result<PathBuf, String> {
         .app_data_dir()
         .map(|path| path.join("models"))
         .map_err(|error| format!("Failed to resolve app data directory: {error}"))
+}
+
+fn engine_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map(|path| path.join("engine"))
+        .map_err(|error| format!("Failed to resolve app data directory: {error}"))
+}
+
+struct PiperPackage {
+    url: &'static str,
+    file_name: &'static str,
+}
+
+fn piper_package() -> Result<PiperPackage, String> {
+    let os = env::consts::OS;
+    let arch = env::consts::ARCH;
+
+    match (os, arch) {
+        ("macos", "aarch64") => Ok(PiperPackage {
+            url: "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_macos_aarch64.tar.gz",
+            file_name: "piper_macos_aarch64.tar.gz",
+        }),
+        ("macos", "x86_64") => Ok(PiperPackage {
+            url: "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_macos_x64.tar.gz",
+            file_name: "piper_macos_x64.tar.gz",
+        }),
+        ("linux", "x86_64") => Ok(PiperPackage {
+            url: "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_x86_64.tar.gz",
+            file_name: "piper_linux_x86_64.tar.gz",
+        }),
+        ("linux", "aarch64") => Ok(PiperPackage {
+            url: "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_aarch64.tar.gz",
+            file_name: "piper_linux_aarch64.tar.gz",
+        }),
+        ("windows", "x86_64") => Ok(PiperPackage {
+            url: "https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_windows_amd64.zip",
+            file_name: "piper_windows_amd64.zip",
+        }),
+        _ => Err(format!("Automatic Piper download is not available for {os}/{arch}.")),
+    }
+}
+
+fn extract_archive(archive_path: &Path, destination: &Path) -> Result<(), String> {
+    let file_name = archive_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
+
+    if file_name.ends_with(".tar.gz") {
+        let archive_file = fs::File::open(archive_path)
+            .map_err(|error| format!("Failed to open Piper archive: {error}"))?;
+        let decoder = flate2::read::GzDecoder::new(archive_file);
+        let mut archive = tar::Archive::new(decoder);
+        archive
+            .unpack(destination)
+            .map_err(|error| format!("Failed to extract Piper archive: {error}"))?;
+        return Ok(());
+    }
+
+    if file_name.ends_with(".zip") {
+        let archive_file = fs::File::open(archive_path)
+            .map_err(|error| format!("Failed to open Piper archive: {error}"))?;
+        let mut archive = zip::ZipArchive::new(archive_file)
+            .map_err(|error| format!("Failed to read Piper zip: {error}"))?;
+        archive
+            .extract(destination)
+            .map_err(|error| format!("Failed to extract Piper zip: {error}"))?;
+        return Ok(());
+    }
+
+    Err("Unsupported Piper archive format.".to_string())
 }
 
 fn builtin_models() -> Vec<BuiltinModel> {
@@ -431,6 +533,14 @@ fn download_file(url: &str, path: &Path) -> Result<(), String> {
     fs::rename(&temp_path, path).map_err(|error| format!("Failed to finish download: {error}"))
 }
 
+fn find_piper(app: &AppHandle) -> Option<String> {
+    engine_dir(app)
+        .ok()
+        .and_then(|path| find_piper_in_dir(&path))
+        .map(|path| path.to_string_lossy().to_string())
+        .or_else(find_piper_in_path)
+}
+
 fn find_piper_in_path() -> Option<String> {
     let executable = if cfg!(windows) { "piper.exe" } else { "piper" };
     let path_var = env::var_os("PATH")?;
@@ -441,11 +551,34 @@ fn find_piper_in_path() -> Option<String> {
         .map(|candidate| candidate.to_string_lossy().to_string())
 }
 
+fn find_piper_in_dir(dir: &Path) -> Option<PathBuf> {
+    let executable = if cfg!(windows) { "piper.exe" } else { "piper" };
+    let mut stack = vec![dir.to_path_buf()];
+
+    while let Some(current) = stack.pop() {
+        for entry in fs::read_dir(current).ok()?.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(|name| name == executable)
+            {
+                return Some(path);
+            }
+        }
+    }
+
+    None
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             get_setup_state,
+            download_piper_engine,
             download_builtin_model,
             read_book_file,
             synthesize_with_piper

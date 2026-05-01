@@ -25,6 +25,7 @@ The app does not upload ebook text or audio anywhere.
 The app includes a guided setup screen for non-technical users:
 
 - Shows supported voice models as cards.
+- Downloads the Piper engine for the user's current platform.
 - Downloads the selected `.onnx` model and matching `.onnx.json` config into the app data directory.
 - Reads speaker mappings from the model config when available.
 - Auto-detects `piper` from the user's `PATH`.
@@ -35,15 +36,7 @@ Advanced users can open Settings to manually choose a Piper executable or a cust
 
 - Node.js and pnpm for development
 - Rust toolchain for Tauri
-- A Piper executable installed locally for now
-
-Example setup:
-
-```bash
-pip install piper-tts
-```
-
-Voice models can be downloaded from inside the app.
+The app can download Piper and voice models from inside the setup flow. Manual Piper selection is available as a fallback.
 
 ## Development
 

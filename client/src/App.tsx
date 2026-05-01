@@ -85,6 +85,7 @@ export function App() {
   const [language, setLanguage] = useState<TargetLanguage>("zh-CN");
   const [tone, setTone] = useState<Tone>("storytelling");
   const [status, setStatus] = useState<Status>("idle");
+  const [isDownloadingEngine, setIsDownloadingEngine] = useState(false);
   const [isDownloading, setIsDownloading] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -147,6 +148,21 @@ export function App() {
       setBookPath("");
       setStatus("idle");
       setError(formatError(readError));
+    }
+  }
+
+  async function downloadEngine() {
+    setError(null);
+    setIsDownloadingEngine(true);
+
+    try {
+      const path = await invoke<string>("download_piper_engine");
+      setManualPiperPath(path);
+      await refreshSetup();
+    } catch (downloadError) {
+      setError(formatError(downloadError));
+    } finally {
+      setIsDownloadingEngine(false);
     }
   }
 
@@ -230,7 +246,12 @@ export function App() {
 
           <div className="setup-stack">
             <SetupStep index="1" title="准备声音模型">
-              <EngineStatus piperPath={piperPath} onChoose={choosePiper} />
+              <EngineStatus
+                piperPath={piperPath}
+                isDownloading={isDownloadingEngine}
+                onDownload={() => void downloadEngine()}
+                onChoose={choosePiper}
+              />
             </SetupStep>
 
             <SetupStep index="2" title="下载声音模型">
@@ -404,7 +425,17 @@ function SetupStep({ index, title, children }: { index: string; title: string; c
   );
 }
 
-function EngineStatus({ piperPath, onChoose }: { piperPath: string; onChoose: () => void }) {
+function EngineStatus({
+  piperPath,
+  isDownloading,
+  onDownload,
+  onChoose
+}: {
+  piperPath: string;
+  isDownloading: boolean;
+  onDownload: () => void;
+  onChoose: () => void;
+}) {
   if (piperPath) {
     return (
       <div className="engine-status is-ready">
@@ -417,8 +448,12 @@ function EngineStatus({ piperPath, onChoose }: { piperPath: string; onChoose: ()
   return (
     <div className="engine-status">
       <Settings2 aria-hidden="true" />
-      <span>未检测到 Piper。可以先安装 Piper，或在 Settings 里选择已有程序。</span>
-      <button type="button" className="ghost-button" onClick={onChoose}>
+      <span>未检测到本地引擎。下载后即可离线生成音频。</span>
+      <button type="button" onClick={onDownload} disabled={isDownloading}>
+        {isDownloading ? <Loader2 className="spin" aria-hidden="true" /> : <Download aria-hidden="true" />}
+        下载引擎
+      </button>
+      <button type="button" className="ghost-button" onClick={onChoose} disabled={isDownloading}>
         选择 Piper
       </button>
     </div>
