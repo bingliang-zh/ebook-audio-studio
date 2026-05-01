@@ -1,0 +1,9 @@
+node_modules
+dist
+*.tsbuildinfo
+.env
+.env.local
+server/storage/uploads/*
+server/storage/audio/*
+!server/storage/uploads/.gitkeep
+!server/storage/audio/.gitkeep

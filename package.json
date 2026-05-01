@@ -1,0 +1,16 @@
+{
+  "name": "ebook-audio-studio",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@10.27.0",
+  "scripts": {
+    "dev": "concurrently -n server,client -c cyan,magenta \"pnpm --filter server dev\" \"pnpm --filter client dev\"",
+    "build": "pnpm -r build",
+    "lint": "pnpm -r lint",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "typescript": "^5.8.3"
+  }
+}
