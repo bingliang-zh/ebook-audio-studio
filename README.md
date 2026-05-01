@@ -40,16 +40,15 @@ pnpm dev
 
 Client: `http://localhost:5173`
 
-Server: `http://localhost:4000`
+Server: `http://localhost:4100`
 
 ## Environment
 
 ```bash
-PORT=4000
-PUBLIC_BASE_URL=http://localhost:4000
+PORT=4100
+PUBLIC_BASE_URL=http://localhost:4100
 MAX_UPLOAD_MB=50
 TTS_PROVIDER=mock
 ```
 
 Use `TTS_PROVIDER=macos` for local macOS audio generation.
-
